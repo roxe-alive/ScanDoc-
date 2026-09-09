@@ -8,8 +8,6 @@ import asyncio
 import numpy as np
 
 
-
-
 from PIL import Image
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
