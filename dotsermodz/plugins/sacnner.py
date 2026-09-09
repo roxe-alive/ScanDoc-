@@ -1,15 +1,12 @@
 # plugins/scanner.py
 
 import os
-import cv2
 import uuid
 import shutil
-import asyncio
+import cv2
 import numpy as np
 
-
-
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
@@ -23,36 +20,97 @@ from dotsermodz import app
 TEMP_DIR = "scanner_temp"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Active scanning jobs
+# job_id -> scan data
 SCAN_JOBS = {}
 
 
 # ============================================================
-# POINT ORDERING
+# KEYBOARD
+# ============================================================
+
+def scan_keyboard(job_id):
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🪄 Auto",
+                callback_data=f"scan|auto|{job_id}"
+            ),
+            InlineKeyboardButton(
+                "🎨 Color",
+                callback_data=f"scan|color|{job_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⚫ B&W",
+                callback_data=f"scan|bw|{job_id}"
+            ),
+            InlineKeyboardButton(
+                "🌑 Gray",
+                callback_data=f"scan|gray|{job_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✨ Enhance",
+                callback_data=f"scan|enhance|{job_id}"
+            ),
+            InlineKeyboardButton(
+                "✂️ Crop",
+                callback_data=f"scan|crop|{job_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📕 Create PDF",
+                callback_data=f"scan|pdf|{job_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Cancel",
+                callback_data=f"scan|cancel|{job_id}"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# ORDER FOUR POINTS
 # ============================================================
 
 def order_points(points):
 
-    points = np.array(points, dtype=np.float32)
+    points = np.asarray(
+        points,
+        dtype=np.float32
+    )
 
-    rect = np.zeros((4, 2), dtype=np.float32)
+    result = np.zeros(
+        (4, 2),
+        dtype=np.float32
+    )
 
-    s = points.sum(axis=1)
-    d = np.diff(points, axis=1)
+    total = points.sum(axis=1)
+    difference = np.diff(
+        points,
+        axis=1
+    ).reshape(-1)
 
-    rect[0] = points[np.argmin(s)]      # TL
-    rect[1] = points[np.argmin(d)]      # TR
-    rect[2] = points[np.argmax(s)]      # BR
-    rect[3] = points[np.argmax(d)]      # BL
+    result[0] = points[np.argmin(total)]       # TL
+    result[1] = points[np.argmin(difference)]  # TR
+    result[2] = points[np.argmax(total)]       # BR
+    result[3] = points[np.argmax(difference)] # BL
 
-    return rect
+    return result
 
 
 # ============================================================
-# PERSPECTIVE CROP
+# FOUR POINT PERSPECTIVE
 # ============================================================
 
-def perspective_crop(image, points):
+def four_point_transform(image, points):
 
     rect = order_points(points)
 
@@ -64,11 +122,18 @@ def perspective_crop(image, points):
     height_a = np.linalg.norm(tr - br)
     height_b = np.linalg.norm(tl - bl)
 
-    width = int(max(width_a, width_b))
-    height = int(max(height_a, height_b))
+    width = max(
+        int(round(width_a)),
+        int(round(width_b))
+    )
 
-    width = max(width, 1)
-    height = max(height, 1)
+    height = max(
+        int(round(height_a)),
+        int(round(height_b))
+    )
+
+    if width < 10 or height < 10:
+        return None
 
     destination = np.array([
         [0, 0],
@@ -85,7 +150,9 @@ def perspective_crop(image, points):
     return cv2.warpPerspective(
         image,
         matrix,
-        (width, height)
+        (width, height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE
     )
 
 
@@ -95,17 +162,18 @@ def perspective_crop(image, points):
 
 def detect_document(image):
 
-    original_h, original_w = image.shape[:2]
+    original = image
 
+    h, w = image.shape[:2]
+
+    # Resize only for detection
     max_width = 1800
 
-    scale = 1.0
+    if w > max_width:
 
-    if original_w > max_width:
+        scale = max_width / float(w)
 
-        scale = max_width / original_w
-
-        small = cv2.resize(
+        image = cv2.resize(
             image,
             None,
             fx=scale,
@@ -114,31 +182,35 @@ def detect_document(image):
         )
 
     else:
-        small = image.copy()
+
+        scale = 1.0
 
     gray = cv2.cvtColor(
-        small,
+        image,
         cv2.COLOR_BGR2GRAY
     )
 
-    # Noise reduction
+    # Improve contrast
+    gray = cv2.equalizeHist(gray)
+
+    # Blur
     blur = cv2.GaussianBlur(
         gray,
         (5, 5),
         0
     )
 
-    # Strong edges
+    # Edges
     edges = cv2.Canny(
         blur,
-        40,
+        30,
         150
     )
 
-    # Connect border gaps
+    # Close broken borders
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (7, 7)
+        (5, 5)
     )
 
     edges = cv2.morphologyEx(
@@ -154,15 +226,26 @@ def detect_document(image):
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    image_area = small.shape[0] * small.shape[1]
+    image_area = (
+        image.shape[0] *
+        image.shape[1]
+    )
 
     candidates = []
 
-    for contour in contours:
+    # Largest contours first
+    contours = sorted(
+        contours,
+        key=cv2.contourArea,
+        reverse=True
+    )
 
-        area = cv2.contourArea(contour)
+    for contour in contours[:100]:
 
-        # Allow both small-ish and large documents
+        area = cv2.contourArea(
+            contour
+        )
+
         if area < image_area * 0.08:
             continue
 
@@ -171,71 +254,88 @@ def detect_document(image):
             True
         )
 
-        # Try several approximation levels
-        found = None
+        # Try different approximations
+        best = None
 
-        for epsilon_factor in (
+        for epsilon in (
             0.01,
             0.015,
             0.02,
             0.025,
             0.03,
-            0.04
+            0.04,
+            0.05
         ):
 
             approx = cv2.approxPolyDP(
                 contour,
-                epsilon_factor * perimeter,
+                epsilon * perimeter,
                 True
             )
 
             if len(approx) == 4:
-                found = approx
-                break
 
-        if found is None:
+                candidate_area = cv2.contourArea(
+                    approx
+                )
+
+                if candidate_area > 0:
+                    best = approx
+                    break
+
+        if best is None:
             continue
 
-        points = found.reshape(4, 2)
-
-        x, y, w, h = cv2.boundingRect(
-            found
+        points = best.reshape(
+            4,
+            2
+        ).astype(
+            np.float32
         )
 
-        if w < 100 or h < 100:
+        # Convex quadrilateral
+        if not cv2.isContourConvex(
+            best
+        ):
             continue
 
-        rectangularity = area / float(
-            max(w * h, 1)
+        x, y, cw, ch = cv2.boundingRect(
+            best
         )
 
-        if rectangularity < 0.40:
+        if cw < 100 or ch < 100:
             continue
 
-        # Check whether the shape is reasonably quadrilateral.
-        # This allows square and arbitrary rectangle ratios.
-        sides = []
+        rect_area = cw * ch
 
-        ordered = order_points(points)
+        rectangularity = (
+            area / rect_area
+            if rect_area
+            else 0
+        )
 
-        for i in range(4):
-
-            p1 = ordered[i]
-            p2 = ordered[(i + 1) % 4]
-
-            sides.append(
-                np.linalg.norm(p2 - p1)
-            )
-
-        if min(sides) < 50:
+        if rectangularity < 0.35:
             continue
 
-        # Score:
-        # larger area = better
-        # rectangularity = better
+        # Don't require A4 ratio.
+        # Square, portrait and landscape rectangles
+        # are all accepted.
+
+        # Avoid shapes touching the complete image edge
+        touches_edges = (
+            x <= 2 or
+            y <= 2 or
+            x + cw >= image.shape[1] - 2 or
+            y + ch >= image.shape[0] - 2
+        )
+
+        # Slightly reduce score for full-image contour
+        edge_penalty = 0.70 if touches_edges else 1.0
+
         score = (
             area *
-            (0.5 + rectangularity)
+            rectangularity *
+            edge_penalty
         )
 
         candidates.append(
@@ -255,12 +355,24 @@ def detect_document(image):
 
     points = candidates[0][1]
 
+    # Convert back to original coordinates
     if scale != 1.0:
         points = points / scale
 
-    return points.astype(
-        np.float32
+    # Safety check
+    points[:, 0] = np.clip(
+        points[:, 0],
+        0,
+        original.shape[1] - 1
     )
+
+    points[:, 1] = np.clip(
+        points[:, 1],
+        0,
+        original.shape[0] - 1
+    )
+
+    return points
 
 
 # ============================================================
@@ -271,25 +383,27 @@ def fallback_crop(image):
 
     h, w = image.shape[:2]
 
-    margin_x = int(w * 0.015)
-    margin_y = int(h * 0.015)
+    margin_x = max(
+        int(w * 0.01),
+        1
+    )
+
+    margin_y = max(
+        int(h * 0.01),
+        1
+    )
 
     return image[
         margin_y:h - margin_y,
         margin_x:w - margin_x
-    ]
+    ].copy()
 
 
 # ============================================================
-# FILTERS
+# COLOR FILTER
 # ============================================================
 
-def filter_original(image):
-
-    return image
-
-
-def filter_color(image):
+def color_filter(image):
 
     lab = cv2.cvtColor(
         image,
@@ -311,13 +425,19 @@ def filter_color(image):
         b
     ])
 
-    return cv2.cvtColor(
+    result = cv2.cvtColor(
         result,
         cv2.COLOR_LAB2BGR
     )
 
+    return result
 
-def filter_grayscale(image):
+
+# ============================================================
+# GRAYSCALE
+# ============================================================
+
+def grayscale_filter(image):
 
     gray = cv2.cvtColor(
         image,
@@ -337,18 +457,27 @@ def filter_grayscale(image):
     )
 
 
-def filter_bw(image):
+# ============================================================
+# BLACK & WHITE
+# ============================================================
+
+def bw_filter(image):
 
     gray = cv2.cvtColor(
         image,
         cv2.COLOR_BGR2GRAY
     )
 
-    # Normalize lighting
+    # Normalize uneven lighting
     background = cv2.GaussianBlur(
         gray,
         (0, 0),
         21
+    )
+
+    background = np.maximum(
+        background,
+        1
     )
 
     normalized = cv2.divide(
@@ -374,7 +503,7 @@ def filter_bw(image):
         10
     )
 
-    # Remove tiny noise
+    # Remove small noise
     kernel = np.ones(
         (2, 2),
         np.uint8
@@ -393,60 +522,40 @@ def filter_bw(image):
 
 
 # ============================================================
-# ENHANCEMENT
+# ENHANCE
 # ============================================================
 
-def enhance_image(image):
+def enhance_filter(image):
 
-    # Work in LAB
-    lab = cv2.cvtColor(
-        image,
-        cv2.COLOR_BGR2LAB
+    result = color_filter(
+        image
     )
 
-    l, a, b = cv2.split(lab)
-
-    clahe = cv2.createCLAHE(
-        clipLimit=2.5,
-        tileGridSize=(8, 8)
-    )
-
-    l = clahe.apply(l)
-
-    result = cv2.merge([
-        l,
-        a,
-        b
-    ])
-
-    result = cv2.cvtColor(
+    # Unsharp mask
+    blurred = cv2.GaussianBlur(
         result,
-        cv2.COLOR_LAB2BGR
+        (0, 0),
+        2
     )
 
-    # Mild sharpening
-    kernel = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-
-    result = cv2.filter2D(
+    result = cv2.addWeighted(
         result,
-        -1,
-        kernel
+        1.25,
+        blurred,
+        -0.25,
+        0
     )
 
     return result
 
 
 # ============================================================
-# IMAGE SAVE
+# SAVE JPEG
 # ============================================================
 
 def save_image(image, path):
 
-    cv2.imwrite(
+    success = cv2.imwrite(
         path,
         image,
         [
@@ -455,9 +564,14 @@ def save_image(image, path):
         ]
     )
 
+    if not success:
+        raise RuntimeError(
+            "Failed to save processed image."
+        )
+
 
 # ============================================================
-# PDF
+# CREATE A4 PDF
 # ============================================================
 
 def create_pdf(image_path, pdf_path):
@@ -473,11 +587,13 @@ def create_pdf(image_path, pdf_path):
     margin = 18
 
     available_width = (
-        page_width - margin * 2
+        page_width -
+        (margin * 2)
     )
 
     available_height = (
-        page_height - margin * 2
+        page_height -
+        (margin * 2)
     )
 
     scale = min(
@@ -489,11 +605,13 @@ def create_pdf(image_path, pdf_path):
     draw_height = height * scale
 
     x = (
-        page_width - draw_width
+        page_width -
+        draw_width
     ) / 2
 
     y = (
-        page_height - draw_height
+        page_height -
+        draw_height
     ) / 2
 
     pdf = canvas.Canvas(
@@ -516,59 +634,47 @@ def create_pdf(image_path, pdf_path):
 
 
 # ============================================================
-# FILTER KEYBOARD
+# PREVIEW IMAGE
 # ============================================================
 
-def filter_keyboard():
+async def send_preview(
+    message,
+    job,
+    caption
+):
 
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🪄 Auto",
-                callback_data="scan:auto"
-            ),
-            InlineKeyboardButton(
-                "🎨 Color",
-                callback_data="scan:color"
+    # Remove previous preview if possible
+    old_message_id = job.get(
+        "preview_message_id"
+    )
+
+    if old_message_id:
+
+        try:
+
+            await app.delete_messages(
+                message.chat.id,
+                old_message_id
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "⚫ B&W",
-                callback_data="scan:bw"
-            ),
-            InlineKeyboardButton(
-                "🌑 Gray",
-                callback_data="scan:gray"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✨ Enhance",
-                callback_data="scan:enhance"
-            ),
-            InlineKeyboardButton(
-                "✂️ Crop",
-                callback_data="scan:crop"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📕 Create PDF",
-                callback_data="scan:pdf"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ Cancel",
-                callback_data="scan:cancel"
-            )
-        ]
-    ])
+
+        except Exception:
+            pass
+
+    preview_message = await message.reply_photo(
+        photo=job["result_path"],
+        caption=caption,
+        reply_markup=scan_keyboard(
+            job["id"]
+        )
+    )
+
+    job["preview_message_id"] = (
+        preview_message.id
+    )
 
 
 # ============================================================
-# PHOTO HANDLER
+# PHOTO RECEIVER
 # ============================================================
 
 @app.on_message(
@@ -596,9 +702,9 @@ async def scanner_photo(
         "original.jpg"
     )
 
-    processed_path = os.path.join(
+    result_path = os.path.join(
         job_dir,
-        "processed.jpg"
+        "result.jpg"
     )
 
     pdf_path = os.path.join(
@@ -606,10 +712,12 @@ async def scanner_photo(
         "document.pdf"
     )
 
+    status = None
+
     try:
 
         status = await message.reply_text(
-            "📄 **Preparing scanner...**\n\n"
+            "📄 **Document Scanner**\n\n"
             "⬇️ Downloading image..."
         )
 
@@ -622,13 +730,14 @@ async def scanner_photo(
         )
 
         if image is None:
-            raise Exception(
-                "Unable to read the image."
+            raise RuntimeError(
+                "Could not read the image."
             )
 
         await status.edit_text(
             "🔍 **Identifying document...**\n\n"
-            "Searching for square / rectangular borders..."
+            "Looking for square or rectangular "
+            "borders..."
         )
 
         points = detect_document(
@@ -637,14 +746,20 @@ async def scanner_photo(
 
         if points is not None:
 
-            cropped = perspective_crop(
+            cropped = four_point_transform(
                 image,
                 points
             )
 
-            detection = (
-                "✅ Square/rectangle border detected"
-            )
+            if cropped is None:
+                cropped = fallback_crop(
+                    image
+                )
+
+                detected = False
+
+            else:
+                detected = True
 
         else:
 
@@ -652,48 +767,78 @@ async def scanner_photo(
                 image
             )
 
-            detection = (
-                "⚠️ Border not confidently detected"
-            )
+            detected = False
 
-        # Save initial auto result
-        save_image(
-            cropped,
-            processed_path
+        # Initial Auto filter
+        result = color_filter(
+            cropped
         )
 
-        # Store job
+        save_image(
+            result,
+            result_path
+        )
+
         SCAN_JOBS[job_id] = {
-            "user_id": message.from_user.id,
+            "id": job_id,
+            "user_id": (
+                message.from_user.id
+                if message.from_user
+                else 0
+            ),
             "chat_id": message.chat.id,
             "original": image,
             "cropped": cropped,
-            "result": cropped.copy(),
-            "path": processed_path,
-            "pdf": pdf_path,
-            "detected": points is not None,
-            "filter": "auto"
+            "result": result,
+            "result_path": result_path,
+            "pdf_path": pdf_path,
+            "detected": detected,
+            "filter": "auto",
+            "preview_message_id": None,
+            "directory": job_dir
         }
 
-        await status.edit_text(
-            f"📄 **Document identified**\n\n"
-            f"{detection}\n"
-            f"✂️ Perspective crop ready\n\n"
-            f"**Choose a filter or enhancement:**",
-            reply_markup=filter_keyboard()
+        detection_text = (
+            "✅ Square/rectangle detected"
+            if detected
+            else
+            "⚠️ Border not confidently detected"
+        )
+
+        await status.delete()
+
+        caption = (
+            "📄 **Document Identified**\n\n"
+            f"{detection_text}\n"
+            "📐 Perspective corrected\n"
+            "✂️ Automatic crop applied\n\n"
+            "Choose a filter or enhancement:"
+        )
+
+        await send_preview(
+            message,
+            SCAN_JOBS[job_id],
+            caption
         )
 
     except Exception as e:
 
         print(
-            "[SCANNER ERROR]",
+            "[SCANNER PHOTO ERROR]",
             repr(e)
         )
 
-        await message.reply_text(
-            "❌ Scanner error:\n\n"
-            f"`{str(e)[:1500]}`"
-        )
+        if status:
+
+            try:
+
+                await status.edit_text(
+                    "❌ **Scanner Error**\n\n"
+                    f"`{str(e)[:1500]}`"
+                )
+
+            except Exception:
+                pass
 
         shutil.rmtree(
             job_dir,
@@ -702,50 +847,59 @@ async def scanner_photo(
 
 
 # ============================================================
-# CALLBACK HANDLER
+# CALLBACK
 # ============================================================
 
 @app.on_callback_query(
-    filters.regex(r"^scan:")
+    filters.regex(r"^scan\|")
 )
 async def scanner_callback(
     client,
     callback_query
 ):
 
-    data = callback_query.data
+    try:
 
-    action = data.split(
-        ":",
-        1
-    )[1]
-
-    # Find user's job
-    job_id = None
-
-    for jid, job in SCAN_JOBS.items():
-
-        if (
-            job["user_id"]
-            == callback_query.from_user.id
-            and job["chat_id"]
-            == callback_query.message.chat.id
-        ):
-            job_id = jid
-            break
-
-    if not job_id:
-
-        await callback_query.answer(
-            "This scan has expired.",
-            show_alert=True
+        parts = callback_query.data.split(
+            "|"
         )
 
-        return
+        if len(parts) != 3:
+            await callback_query.answer(
+                "Invalid scanner action.",
+                show_alert=True
+            )
+            return
 
-    job = SCAN_JOBS[job_id]
+        _, action, job_id = parts
 
-    try:
+        job = SCAN_JOBS.get(
+            job_id
+        )
+
+        if not job:
+
+            await callback_query.answer(
+                "This scan has expired.",
+                show_alert=True
+            )
+
+            return
+
+        user_id = (
+            callback_query.from_user.id
+            if callback_query.from_user
+            else 0
+        )
+
+        if user_id != job["user_id"]:
+
+            await callback_query.answer(
+                "This scan belongs to another user.",
+                show_alert=True
+            )
+
+            return
 
         # ----------------------------------------------------
         # CANCEL
@@ -753,8 +907,66 @@ async def scanner_callback(
 
         if action == "cancel":
 
-            await callback_query.message.edit_text(
-                "❌ **Scan cancelled.**"
+            await callback_query.answer(
+                "Scan cancelled."
+            )
+
+            try:
+                await callback_query.message.delete()
+            except Exception:
+                pass
+
+            shutil.rmtree(
+                job["directory"],
+                ignore_errors=True
+            )
+
+            SCAN_JOBS.pop(
+                job_id,
+                None
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # PDF
+        # ----------------------------------------------------
+
+        if action == "pdf":
+
+            await callback_query.answer(
+                "Creating PDF..."
+            )
+
+            await callback_query.message.edit_caption(
+                caption="📕 **Creating PDF...**"
+            )
+
+            create_pdf(
+                job["result_path"],
+                job["pdf_path"]
+            )
+
+            await callback_query.message.reply_document(
+                document=job["pdf_path"],
+                caption=(
+                    "📄 **Scanned PDF**\n\n"
+                    "✅ Document identified\n"
+                    "✂️ Border crop\n"
+                    "📐 Perspective correction\n"
+                    f"🎨 Filter: {job['filter'].title()}\n"
+                    "📕 A4 PDF"
+                )
+            )
+
+            try:
+                await callback_query.message.delete()
+            except Exception:
+                pass
+
+            shutil.rmtree(
+                job["directory"],
+                ignore_errors=True
             )
 
             SCAN_JOBS.pop(
@@ -772,33 +984,40 @@ async def scanner_callback(
 
             if job["detected"]:
 
-                job["result"] = job["cropped"].copy()
-
-                await callback_query.answer(
-                    "Automatic border crop applied."
-                )
+                cropped = job["cropped"].copy()
 
             else:
 
-                job["result"] = fallback_crop(
+                cropped = fallback_crop(
                     job["original"]
                 )
 
-                await callback_query.answer(
-                    "Safe crop applied."
-                )
+            job["cropped"] = cropped
+            job["result"] = cropped.copy()
+            job["filter"] = "crop"
 
             save_image(
                 job["result"],
-                job["path"]
+                job["result_path"]
             )
 
-            await callback_query.message.edit_text(
-                "✂️ **Crop applied**\n\n"
-                "The document border has been cropped "
-                "and perspective corrected.\n\n"
-                "Choose another filter or create PDF:",
-                reply_markup=filter_keyboard()
+            await callback_query.answer(
+                "Crop applied."
+            )
+
+            caption = (
+                "✂️ **Crop Applied**\n\n"
+                "✅ Document border processed\n"
+                "📐 Perspective corrected\n\n"
+                "Choose another filter or create PDF:"
+            )
+
+            await callback_query.message.delete()
+
+            await send_preview(
+                callback_query.message,
+                job,
+                caption
             )
 
             return
@@ -807,110 +1026,76 @@ async def scanner_callback(
         # FILTER
         # ----------------------------------------------------
 
+        base = job["cropped"]
+
         if action == "auto":
 
-            result = job["cropped"].copy()
+            result = color_filter(
+                base
+            )
 
         elif action == "color":
 
-            result = filter_color(
-                job["cropped"]
+            result = color_filter(
+                base
             )
 
         elif action == "gray":
 
-            result = filter_grayscale(
-                job["cropped"]
+            result = grayscale_filter(
+                base
             )
 
         elif action == "bw":
 
-            result = filter_bw(
-                job["cropped"]
+            result = bw_filter(
+                base
             )
 
         elif action == "enhance":
 
-            result = enhance_image(
-                job["cropped"]
+            result = enhance_filter(
+                base
             )
-
-        # ----------------------------------------------------
-        # PDF
-        # ----------------------------------------------------
-
-        elif action == "pdf":
-
-            save_image(
-                job["result"],
-                job["path"]
-            )
-
-            await callback_query.message.edit_text(
-                "📕 **Creating PDF...**"
-            )
-
-            create_pdf(
-                job["path"],
-                job["pdf"]
-            )
-
-            await callback_query.message.reply_document(
-                document=job["pdf"],
-                caption=(
-                    "📄 **Scanned Document**\n\n"
-                    "✅ Border identification\n"
-                    "✂️ Perspective crop\n"
-                    "✨ Selected filter applied\n"
-                    "📕 A4 PDF"
-                )
-            )
-
-            await callback_query.message.delete()
-
-            # Cleanup
-            shutil.rmtree(
-                os.path.dirname(job["path"]),
-                ignore_errors=True
-            )
-
-            SCAN_JOBS.pop(
-                job_id,
-                None
-            )
-
-            return
 
         else:
-            return
 
-        # ----------------------------------------------------
-        # SAVE RESULT
-        # ----------------------------------------------------
+            await callback_query.answer(
+                "Unknown filter.",
+                show_alert=True
+            )
+
+            return
 
         job["result"] = result
         job["filter"] = action
 
         save_image(
             result,
-            job["path"]
+            job["result_path"]
         )
 
         await callback_query.answer(
             f"{action.title()} applied."
         )
 
-        await callback_query.message.edit_text(
-            "📄 **Scan Preview Ready**\n\n"
-            f"🔍 {(
-                'Border detected'
-                if job['detected']
-                else 'Safe crop used'
-            )}\n"
-            f"✂️ Perspective corrected\n"
+        try:
+            await callback_query.message.delete()
+        except Exception:
+            pass
+
+        caption = (
+            "📄 **Scan Preview**\n\n"
+            "✅ Border identified\n"
+            "✂️ Perspective crop\n"
             f"🎨 Filter: **{action.title()}**\n\n"
-            "Choose another option or create PDF:",
-            reply_markup=filter_keyboard()
+            "Select another filter or create PDF:"
+        )
+
+        await send_preview(
+            callback_query.message,
+            job,
+            caption
         )
 
     except Exception as e:
@@ -920,7 +1105,12 @@ async def scanner_callback(
             repr(e)
         )
 
-        await callback_query.answer(
-            "Processing failed.",
-            show_alert=True
-        )
+        try:
+
+            await callback_query.answer(
+                "Processing failed.",
+                show_alert=True
+            )
+
+        except Exception:
+            pass
