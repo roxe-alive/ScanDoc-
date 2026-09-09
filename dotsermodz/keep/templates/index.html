@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DOT 007</title>
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="Nothing Here" />
+    <meta name="theme-color" content="#06c1db">
+    <link rel="icon" href="https://dotsermodz-online.onrender.com/favicon.png" type="image/x-icon" />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background: #000;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        font-family: Arial, sans-serif;
+      }
+
+      .container {
+        flex: 1;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        text-align: center;
+        flex-direction: column;
+      }
+
+      h1 {
+        color: #fff;
+        font-size: 8vw;
+        margin: 0;
+        word-break: break-word;
+      }
+      .issue {
+        color: #ccc;
+        margin-top: 15px;
+        font-size: 10px;
+      }
+
+      .issue a {
+        color: #00f0ff;
+        text-decoration: none;
+        font-weight: bold;
+        margin-left: 5px;
+      }
+
+      .issue a:hover {
+        text-decoration: underline;
+      }
+
+
+      .description {
+        color: #aaa;
+        font-size: 1.5vw;
+        margin-top: 10px;
+      }
+
+      footer {
+        text-align: center;
+        color: white;
+        padding: 10px 0;
+        font-size: 14px;
+      }
+
+      @media (max-width: 768px) {
+        h1 {
+          font-size: 10vw;
+        }
+        .description {
+          font-size: 3vw;
+        }
+      }
+
+      @media (max-width: 480px) {
+        h1 {
+          font-size: 12vw;
+        }
+        .description {
+          font-size: 4vw;
+        }
+      }
+
+      
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="flame">
+        <h1><span>DOT-007</span></h1>
+          <div class="issue">
+            <span>Having issue?</span>
+            <a href="https://dotsermodz-online.onrender.com" target="_blank">View Tutorial</a>
+            <p><strong>OS BOOT TIME:</strong> {{ os_uptime }}</p>
+            <p><strong>Uptime:</strong> {{ uptime }}</p>
+
+          </div>
+      </div>
+    </div>
+    <footer>
+      &copy; 2025 DOTSERMODZ
+    </footer>
+  </body>
+</html>
