@@ -9,6 +9,8 @@ load_dotenv("config.env")
 API_ID = os.environ.get('API_ID')
 API_HASH = os.environ.get('API_HASH')
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
+BOT_NAME = os.environ.get('BOT_NAME',"Roxe Beta")
+SUDO = list(map(int, os.environ.get("SUDO", "0").split(',')))
 PORT = int(os.environ.get('PORT', 8080))  # Default to 8080 if not set
 OG_BOT_NAME = ('𝑅𝒐𝒛𝒆𝒔𓆩♡𓆪')
 UPTIME_URL = os.environ.get("UPTIME_URL") # Don't Edit
